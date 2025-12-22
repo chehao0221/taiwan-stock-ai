@@ -10,45 +10,34 @@ import os
 # 忽略警告訊息
 warnings.filterwarnings("ignore")
 
-# 從環境變數讀取 Webhook (GitHub Secrets)
+# 從 GitHub Secrets 讀取 Webhook
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 YEARS = 3
 TOP_PICK = 5
-MIN_VOLUME = 500000  # 過濾條件：20日平均成交量需大於 500 張 (500,000 股)
+MIN_VOLUME = 500000  # 過濾條件：20日平均成交量需大於 500 張
 
-# ====== 自動抓取清單與流動性過濾 ======
 def get_taiwan_list():
-    print("🔍 正在獲取證交所最新清單...")
+    print("🔍 正在從證交所獲取清單...")
     try:
-        # 證交所上市證券清單
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
         res = requests.get(url)
         df = pd.read_html(res.text)[0]
-        
         df.columns = df.iloc[0]
         df = df.iloc[1:]
-        
         symbols = []
         for index, row in df.iterrows():
             item = row['有價證券代號及名稱']
             if not isinstance(item, str): continue
-            
             code = item.split('\u3000')[0]
             cfi = str(row['CFICode'])
-            
-            # 抓取普通股 (ES) 與 ETF (CE)
             if cfi.startswith('ES') or cfi.startswith('CE'):
                 symbols.append(code + ".TW")
-        
-        # 先取前 300 檔進行流動性掃描 (涵蓋多數大標的)
-        return list(set(symbols[:300]))
-
+        return list(set(symbols[:300])) # 掃描前 300 檔標的
     except Exception as e:
-        print(f"❌ 抓取失敗: {e}，改用保底清單")
-        return ["0050.TW", "0056.TW", "2330.TW", "2317.TW", "2454.TW"]
+        print(f"❌ 抓取失敗: {e}")
+        return ["0050.TW", "2330.TW", "2317.TW", "2454.TW", "0056.TW"]
 
-# ====== 技術指標計算 ======
 def compute_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0).rolling(period).mean()
@@ -64,36 +53,34 @@ def compute_features(df):
     df["volatility"] = df["Close"].pct_change().rolling(20).std()
     return df
 
-# ====== 推送 Discord ======
 def send_discord(scoring, total_analyzed):
     today = datetime.datetime.now().strftime("%Y-%m-%d")
+    if not DISCORD_WEBHOOK_URL:
+        print("❌ 找不到 DISCORD_WEBHOOK_URL 變數，取消發送。")
+        return
     
     if not scoring:
-        msg = f"⚠️ **台股 AI 選股日報 ({today})**\n今日經流動性過濾與 AI 篩選後，無看漲標的。"
+        msg = f"⚠️ **台股 AI 選股日報 ({today})**\n今日經 AI 篩選後，無看漲標的。"
     else:
         msg = f"🚀 **台股 AI 選股日報** ({today})\n"
-        msg += f"📊 已過濾流動性並分析 `{total_analyzed}` 檔高質量標的\n"
+        msg += f"📊 已分析 `{total_analyzed}` 檔高流動性標的\n"
         msg += "━━━━━━━━━━━━━━━\n"
-
-        total_score = sum([x[1] for x in scoring])
+        total_score = sum([max(0, x[1]) for x in scoring])
         for sym, score in scoring:
             weight = (score / total_score) * 100 if total_score > 0 else (100 / len(scoring))
             msg += f"📌 **{sym}**\n"
-            msg += f"    ┣ 預期報酬: `+{score:.2%}`\n"
-            msg += f"    ┗ 權重建議: `{weight:.1f}%`\n"
-        
+            msg += f"    ┣ 預期 5 日報酬: `+{score:.2%}`\n"
+            msg += f"    ┗ 建議權重: `{weight:.1f}%`\n"
         msg += "━━━━━━━━━━━━━━━\n"
-        msg += "⚠️ *註：僅分析日均成交量 > 500張之標的，投資請自負盈虧。*"
+        msg += "⚠️ *註：僅分析成交量 > 500張標的。*"
 
-    payload = {"content": msg}
-    requests.post(DISCORD_WEBHOOK_URL, json=payload)
-    print(msg)
+    requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+    print("✅ Discord 通知已發送")
 
-# ====== 主流程 ======
 def run():
     raw_symbols = get_taiwan_list()
     print(f"📥 下載資料中 (共 {len(raw_symbols)} 檔)...")
-    data = yf.download(raw_symbols, period=f"{YEARS}y", group_by='ticker', progress=False)
+    data = yf.download(raw_symbols, period=f"{YEARS}y", progress=False)
     
     scoring = []
     analyzed_count = 0
@@ -101,15 +88,12 @@ def run():
 
     for sym in raw_symbols:
         try:
-            df = data[sym].copy().dropna(how='all')
-            
-            # --- 流動性過濾 ---
-            # 檢查最近 20 天平均成交量是否達標
-            avg_vol = df["Volume"].tail(20).mean()
-            if avg_vol < MIN_VOLUME:
-                continue
-            
+            # 處理 yfinance 多股票下載後的欄位結構
+            df = data.xs(sym, axis=1, level=1).dropna(how='all') if len(raw_symbols) > 1 else data.dropna(how='all')
             if len(df) < 250: continue
+            
+            # 流動性檢查
+            if df["Volume"].tail(20).mean() < MIN_VOLUME: continue
             
             analyzed_count += 1
             df = compute_features(df)
@@ -118,19 +102,13 @@ def run():
             full_data = df.dropna()
             if full_data.empty: continue
             
-            X = full_data[features_list]
-            y = full_data["future_return"]
-
             model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.07, random_state=42)
-            model.fit(X, y)
+            model.fit(full_data[features_list], full_data["future_return"])
 
             last_features = df[features_list].iloc[-1:].values
             prediction = model.predict(last_features)[0]
-
-            # 門檻：預估漲幅需大於 0.5%
             if prediction > 0.005:
                 scoring.append((sym, prediction))
-
         except:
             continue
 
