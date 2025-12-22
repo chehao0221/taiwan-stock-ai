@@ -16,7 +16,6 @@ HISTORY_FILE = "stock_predictions.csv"
 YEARS = 5
 TOP_PICK = 5
 MIN_VOLUME_SHARES = 1000000 
-# 指定顯示清單 (不管 AI 排名如何都會顯示)
 MUST_WATCH = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW", "00991A.TW"]
 
 def get_tw_stock_list():
@@ -34,7 +33,6 @@ def get_tw_stock_list():
                 code = str(row['有價證券代號及名稱']).split('\u3000')[0]
                 if len(code) == 4 or (len(code) == 5 and code.endswith('A')):
                     symbols.append(code + ".TW")
-        # --- 修改處：從 150 增加到 300 ---
         return list(set(symbols[:300] + MUST_WATCH))
     except:
         return MUST_WATCH
@@ -114,22 +112,22 @@ def run():
     top_picks_keys = sorted(ranking_list, key=lambda x: all_results[x]['pred'], reverse=True)[:TOP_PICK]
     
     now_tw = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
-    report = f"🇹🇼 **最新台股 AI 預測報告** ({now_tw})\n━━━━━━━━━━━━━━━━━━\n"
-    
-    report += "🏆 **AI 預測排行榜 (從前300檔篩選)**\n"
+    report = f"🇹🇼 **台股 AI 預測報告** ({now_tw})\n━━━━━━━━━━━━━━━━━━\n"
+    report += "🏆 **300 股票前 5 的未來預估**\n"
     for i, sym in enumerate(top_picks_keys):
         item = all_results[sym]
         save_prediction(sym, item['pred'], item['price'])
         emoji = ['🥇','🥈','🥉','📈','📈'][i]
-        report += f"{emoji} **{sym}**: `+{item['pred']:.2%}`\n   └ 現價: `{item['price']:.1f}` (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})\n"
+        report += f"{emoji} **{sym}**: `預估 {item['pred']:+.2%}`\n   └ 現價: `{item['price']:.1f}` (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})\n"
 
-    report += "\n💎 **指定監控標的**\n"
+    report += "\n💎 **指定監控標的未來預估**\n"
     for sym in MUST_WATCH:
         if sym in all_results:
             item = all_results[sym]
             status = "🚀" if item['pred'] > 0.02 else "⭐"
             report += f"{status} **{sym}**: `預估 {item['pred']:+.2%}`\n   └ 現價: `{item['price']:.1f}` (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})\n"
 
+    report += "\n💡 *註：預估值為 AI 對未來 5 個交易日後的走勢判斷。*"
     requests.post(DISCORD_WEBHOOK_URL, json={"content": report})
 
 if __name__ == "__main__":
