@@ -10,7 +10,9 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ====== 你的 Discord Webhook (建議不要公開) ======
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1452402941884633149/rkoZVGRL4mVcxprGfbSBOwwlAQpDYeXDhduBG3qVBiQnb5wlHNNaGtRVyf4TYOGpl0-1"
+import os
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
 
 YEARS = 3
 TOP_PICK = 5
@@ -138,3 +140,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+
