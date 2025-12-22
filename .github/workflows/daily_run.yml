@@ -2,13 +2,16 @@ name: Daily Stock AI Prediction
 
 on:
   schedule:
-    # 這裡設定 UTC 時間 07:30 (即台灣時間 15:30)，週一至週五執行
+    # 台灣時間 15:30 執行 (週一至週五)
     - cron: '30 7 * * 1-5'
-  workflow_dispatch: # 讓你可以手動點擊執行測試
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: Asia/Taipei  # 設定時區為台北
 
     steps:
     - name: Checkout code
@@ -18,6 +21,7 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
+        cache: 'pip' # 加入快取功能，下次執行會更快
 
     - name: Install dependencies
       run: |
