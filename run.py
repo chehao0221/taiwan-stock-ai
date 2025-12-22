@@ -90,17 +90,12 @@ def run():
         report += f"{['🥇','🥈','🥉','📈','📈'][i]} **{s}**: `+{p:.2%}`\n"
     send_to_discord(report)
 
-    # 2. 重點標的分段發送 + TradingView 連結
+    # 2. 重點標的分段發送 (純文字版)
     for item in must_watch_details:
         status = "🚀" if item['pred'] > 0.01 else "💎"
-        tv_sym = item['sym'].replace(".TW", "")
-        # 生成台股專屬 TradingView 連結
-        tv_link = f"https://tw.tradingview.com/chart/?symbol=TWSE%3A{tv_sym}"
-        
         msg = f"{status} **{item['sym']}** 深度報告\n"
         msg += f"  - 預測報酬: `{item['pred']:+.2%}`\n"
-        msg += f"  - 現價: {item['price']:.1f} (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})\n"
-        msg += f"  - 📈 走勢圖: {tv_link}"
+        msg += f"  - 現價: {item['price']:.1f} (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})"
         send_to_discord(msg)
 
 if __name__ == "__main__":
