@@ -13,15 +13,22 @@ jobs:
     env:
       TZ: Asia/Taipei  # 設定時區為台北
 
+    # 必須設定權限，Action 才能把 CSV 檔推回倉庫
+    permissions:
+      contents: write
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        # 確保使用目前的 Token 進行 Push
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-        cache: 'pip' # 加入快取功能，下次執行會更快
+        cache: 'pip' 
 
     - name: Install dependencies
       run: |
@@ -32,3 +39,15 @@ jobs:
       env:
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: python run.py
+
+    # --- 新增：自動將預測結果存回 GitHub ---
+    - name: Commit and Push changes
+      run: |
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
+        # 檢查是否有檔案變動，避免沒有變動時推播報錯
+        if [ -f stock_predictions.csv ]; then
+          git add stock_predictions.csv
+          git commit -m "自動更新台股預測紀錄 [skip ci]" || echo "沒有變更需要提交"
+          git push
+        fi
