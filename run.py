@@ -34,7 +34,8 @@ def get_tw_stock_list():
                 code = str(row['有價證券代號及名稱']).split('\u3000')[0]
                 if len(code) == 4 or (len(code) == 5 and code.endswith('A')):
                     symbols.append(code + ".TW")
-        return list(set(symbols[:150] + MUST_WATCH))
+        # --- 修改處：從 150 增加到 300 ---
+        return list(set(symbols[:300] + MUST_WATCH))
     except:
         return MUST_WATCH
 
@@ -88,7 +89,7 @@ def run():
     if acc_report: requests.post(DISCORD_WEBHOOK_URL, json={"content": acc_report})
 
     symbols = get_tw_stock_list()
-    all_results = {} # 用來存放所有計算結果
+    all_results = {}
     feature_cols = ["mom20", "mom60", "rsi", "vol_ratio", "volatility", "bias"]
 
     for sym in symbols:
@@ -109,21 +110,19 @@ def run():
             all_results[sym] = {"pred": pred, "price": latest_price, "sup": sup, "res": res, "vol": df["Volume"].tail(10).mean()}
         except: continue
 
-    # 1. 篩選排行榜 (符合成交量的前 5 名)
     ranking_list = [s for s, v in all_results.items() if v['vol'] >= MIN_VOLUME_SHARES]
     top_picks_keys = sorted(ranking_list, key=lambda x: all_results[x]['pred'], reverse=True)[:TOP_PICK]
     
     now_tw = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
     report = f"🇹🇼 **最新台股 AI 預測報告** ({now_tw})\n━━━━━━━━━━━━━━━━━━\n"
     
-    report += "🏆 **AI 預測排行榜**\n"
+    report += "🏆 **AI 預測排行榜 (從前300檔篩選)**\n"
     for i, sym in enumerate(top_picks_keys):
         item = all_results[sym]
         save_prediction(sym, item['pred'], item['price'])
         emoji = ['🥇','🥈','🥉','📈','📈'][i]
         report += f"{emoji} **{sym}**: `+{item['pred']:.2%}`\n   └ 現價: `{item['price']:.1f}` (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})\n"
 
-    # 2. 顯示指定監控標的 (不論排名)
     report += "\n💎 **指定監控標的**\n"
     for sym in MUST_WATCH:
         if sym in all_results:
