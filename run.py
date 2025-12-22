@@ -16,6 +16,7 @@ HISTORY_FILE = "stock_predictions.csv"
 YEARS = 5
 TOP_PICK = 5
 MIN_VOLUME_SHARES = 1000000 
+# 這些是你特別關心的標的，無論有沒有進前五名，都會單獨報價
 MUST_WATCH = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW", "00991A.TW"]
 
 def get_tw_stock_list():
@@ -46,43 +47,31 @@ def compute_features(df):
     down = (-delta.clip(upper=0)).rolling(14).mean()
     df["rsi"] = 100 - (100 / (1 + up / (down + 1e-9)))
     df["vol_ratio"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1e-9)
-    df["range"] = df["High"] - df["Low"]
-    df["volatility"] = df["range"].rolling(20).mean() / df["Close"]
     df["ma20"] = df["Close"].rolling(20).mean()
     df["bias"] = (df["Close"] - df["ma20"]) / df["ma20"]
+    # 波動率計算
+    df["volatility"] = df["Close"].pct_change().rolling(20).std()
     return df
 
 def check_accuracy_and_report():
-    """自動對帳：檢查 5 個交易日前預測的準確度"""
+    """自動對帳：結算 5 天前的預測"""
     if not os.path.exists(HISTORY_FILE): return ""
-    
     history = pd.read_csv(HISTORY_FILE)
-    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    
-    # 找出「預測日」在 5 天前到 10 天前的紀錄 (避免週末誤差)
     history['Date'] = pd.to_datetime(history['Date'])
-    check_date = datetime.datetime.now() - datetime.timedelta(days=7) # 約 5 個交易日
-    
-    # 篩選出尚未對帳且日期足夠久遠的
+    check_date = datetime.datetime.now() - datetime.timedelta(days=7)
     pending = history[(history['Date'] <= check_date) & (history['Actual_Return'].isna())]
-    
     if pending.empty: return ""
 
-    report = "📊 **AI 準確度回測報告 (5日前預測結算)**\n"
+    report = "📊 **台股 AI 預測準確度結算 (5日前預測)**\n━━━━━━━━━━━━━━━━━━\n"
     for idx, row in pending.iterrows():
         try:
             ticker = yf.Ticker(row['Symbol'])
             current_price = ticker.history(period="1d")["Close"].iloc[-1]
             actual_ret = (current_price / row['Price_At_Pred']) - 1
-            
-            # 更新歷史紀錄
             history.at[idx, 'Actual_Return'] = actual_ret
-            
-            # 判斷 AI 是否猜對方向
             hit = "✅" if (actual_ret > 0 and row['Pred_Return'] > 0) or (actual_ret < 0 and row['Pred_Return'] < 0) else "❌"
             report += f"{hit} {row['Symbol']}: 預估 `{row['Pred_Return']:+.1%}` / 實際 `{actual_ret:+.1%}`\n"
         except: continue
-    
     history.to_csv(HISTORY_FILE, index=False)
     return report
 
@@ -90,23 +79,21 @@ def save_prediction(symbol, pred, price):
     date = datetime.datetime.now().strftime("%Y-%m-%d")
     new_data = pd.DataFrame([[date, symbol, price, pred, np.nan]], 
                             columns=["Date", "Symbol", "Price_At_Pred", "Pred_Return", "Actual_Return"])
-    
     if os.path.exists(HISTORY_FILE):
         history = pd.read_csv(HISTORY_FILE)
         history = pd.concat([history, new_data], ignore_index=True)
-    else:
-        history = new_data
+    else: history = new_data
     history.tail(1000).to_csv(HISTORY_FILE, index=False)
 
 def run():
     if not DISCORD_WEBHOOK_URL: return
     
-    # 先做準確度對帳
+    # 1. 準確度報告
     acc_report = check_accuracy_and_report()
     if acc_report: requests.post(DISCORD_WEBHOOK_URL, json={"content": acc_report})
 
     symbols = get_tw_stock_list()
-    scoring = []; must_watch_details = [] 
+    scoring = []
     feature_cols = ["mom20", "mom60", "rsi", "vol_ratio", "volatility", "bias"]
 
     for sym in symbols:
@@ -114,6 +101,10 @@ def run():
             ticker = yf.Ticker(sym)
             df = ticker.history(period=f"{YEARS}y")
             if len(df) < 100: continue 
+            
+            # 計算支撐與壓力 (近 20 日)
+            sup = df['Low'].tail(20).min()
+            res = df['High'].tail(20).max()
             
             df = compute_features(df)
             df["future_return"] = df["Close"].shift(-5) / df["Close"] - 1
@@ -126,20 +117,25 @@ def run():
             latest_price = df["Close"].iloc[-1]
             pred = model.predict(df[feature_cols].iloc[-1:])[0]
             
-            if sym in MUST_WATCH:
-                must_watch_details.append({"sym": sym, "pred": pred, "price": latest_price})
-            
-            if df["Volume"].tail(10).mean() >= MIN_VOLUME_SHARES:
-                scoring.append((sym, pred, latest_price))
+            # 儲存得分，包含價格與區間資訊
+            if df["Volume"].tail(10).mean() >= MIN_VOLUME_SHARES or sym in MUST_WATCH:
+                scoring.append({
+                    "sym": sym, "pred": pred, "price": latest_price, 
+                    "sup": sup, "res": res
+                })
         except: continue
 
-    # 處理排行榜
-    top_picks = sorted(scoring, key=lambda x: x[1], reverse=True)[:TOP_PICK]
+    # 2. 處理排行榜報告
+    now_tw = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+    top_picks = sorted(scoring, key=lambda x: x['pred'], reverse=True)[:TOP_PICK]
+    
     if top_picks:
-        report = "🇹🇼 **最新台股 AI 預測**\n━━━━━━━━━━━━━━━━━━\n"
-        for i, (s, p, price) in enumerate(top_picks):
-            save_prediction(s, p, price)
-            report += f"{['🥇','🥈','🥉','📈','📈'][i]} **{s}**: `+{p:.2%}`\n"
+        report = f"🇹🇼 **最新台股 AI 預測報告** ({now_tw})\n━━━━━━━━━━━━━━━━━━\n"
+        for i, item in enumerate(top_picks):
+            save_prediction(item['sym'], item['pred'], item['price'])
+            emoji = ['🥇','🥈','🥉','📈','📈'][i]
+            report += f"{emoji} **{item['sym']}**: `+{item['pred']:.2%}`\n"
+            report += f"   └ 現價: `{item['price']:.1f}` (支撐: {item['sup']:.1f} / 壓力: {item['res']:.1f})\n"
         requests.post(DISCORD_WEBHOOK_URL, json={"content": report})
 
 if __name__ == "__main__":
