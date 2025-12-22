@@ -16,7 +16,8 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 YEARS = 2           
 TOP_PICK = 5        
 MIN_VOLUME = 500000 
-MUST_WATCH = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW"] 
+# 包含 00991A，但數據不足時會自動跳過
+MUST_WATCH = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW", "00991A.TW"] 
 
 def get_tw_stock_list():
     try:
@@ -63,12 +64,19 @@ def run():
         try:
             ticker = yf.Ticker(sym)
             df = ticker.history(period=f"{YEARS}y")
-            if len(df) < 100: continue 
+            
+            # 嚴格門檻：數據不足 100 天直接跳過
+            if len(df) < 100: 
+                continue 
+            
             df = compute_features(df)
             df["future_return"] = df["Close"].shift(-5) / df["Close"] - 1
             full_data = df.dropna()
-            if full_data.empty: continue
+            
+            if full_data.empty: 
+                continue
 
+            # 訓練模型
             model = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.07, random_state=42)
             model.fit(full_data[features], full_data["future_return"])
             pred = model.predict(df[features].iloc[-1:])[0]
@@ -78,19 +86,22 @@ def run():
                     "sym": sym, "pred": pred, "price": df["Close"].iloc[-1],
                     "sup": df.tail(20)['Low'].min(), "res": df.tail(20)['High'].max()
                 })
+            
             if df["Volume"].tail(20).mean() >= MIN_VOLUME:
                 scoring.append((sym, pred))
-        except: continue
+        except: 
+            continue
 
-    # 1. 排行榜
+    # 1. 發送排行榜
     today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     top_picks = sorted(scoring, key=lambda x: x[1], reverse=True)[:TOP_PICK]
-    report = f"🇹🇼 **台股 AI 預測報告** ({today})\n━━━━━━━━━━━━━━━━━━\n"
-    for i, (s, p) in enumerate(top_picks):
-        report += f"{['🥇','🥈','🥉','📈','📈'][i]} **{s}**: `+{p:.2%}`\n"
-    send_to_discord(report)
+    if top_picks:
+        report = f"🇹🇼 **台股 AI 預測報告** ({today})\n━━━━━━━━━━━━━━━━━━\n"
+        for i, (s, p) in enumerate(top_picks):
+            report += f"{['🥇','🥈','🥉','📈','📈'][i]} **{s}**: `+{p:.2%}`\n"
+        send_to_discord(report)
 
-    # 2. 重點標的分段發送 (純文字版)
+    # 2. 發送重點標的
     for item in must_watch_details:
         status = "🚀" if item['pred'] > 0.01 else "💎"
         msg = f"{status} **{item['sym']}** 深度報告\n"
