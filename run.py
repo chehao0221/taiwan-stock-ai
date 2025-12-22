@@ -40,6 +40,7 @@ def get_etf_list():
         return list(set(symbols[:1000]))
     except Exception as e:
         print(f"❌ 抓取失敗: {e}，改用主流 ETF 保底")
+        # 納入您提到的 00919 與主流標的
         return ["0050.TW", "0056.TW", "00878.TW", "00919.TW", "00929.TW", "00713.TW"]
 
 # ====== 2. 技術指標計算 (技術面) ======
@@ -95,7 +96,7 @@ def send_discord(scoring, total_analyzed):
 def run():
     etf_symbols = get_etf_list()
     print(f"📥 下載 ETF 歷史資料中 (共 {len(etf_symbols)} 檔)...")
-    data = yf.download(etf_symbols, period="3y", progress=False)
+    data = yf.download(etf_symbols, period=f"{YEARS}y", progress=False)
     
     scoring = []
     analyzed_count = 0
@@ -103,7 +104,7 @@ def run():
 
     for sym in etf_symbols:
         try:
-            # 取得該 ETF 數據
+            # 取得該 ETF 數據並處理 yfinance 欄位結構
             df = data.xs(sym, axis=1, level=1).dropna(how='all') if len(etf_symbols) > 1 else data.dropna(how='all')
             
             if len(df) < 250: continue # 需至少有一年數據
