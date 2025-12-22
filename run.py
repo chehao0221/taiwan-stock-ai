@@ -9,20 +9,20 @@ import os
 
 warnings.filterwarnings("ignore")
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+# 1. 修正變數名稱以對應您的 GitHub Secret
+DISCORD_WEBHOOK_URL = os.getenv("NEWS_WEBHOOK_URL")
 
 # ====== 設定區 ======
 YEARS = 3
 TOP_PICK = 5
 MIN_VOLUME = 500000 
-# 這裡定義您的必看名單
-MUST_WATCH = ["2330.TW", "2317.TW", "00919.TW", "0050.TW", "00991A.TW"] 
+MUST_WATCH = ["2330.TW", "2317.TW", "2454.TW", "0050.TW"] 
 
-# ====== 1. 抓取清單 ======
+# 抓取清單邏輯
 def get_combined_list():
     try:
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
-        res = requests.get(url)
+        res = requests.get(url, timeout=15)
         df = pd.read_html(res.text)[0]
         df.columns = df.iloc[0]
         df = df.iloc[1:]
@@ -32,13 +32,29 @@ def get_combined_list():
             if cfi.startswith('ES') or cfi.startswith('CE'):
                 code = row['有價證券代號及名稱'].split('\u3000')[0]
                 symbols.append(code + ".TW")
-        # 結合必看名單與前500檔
-        return list(set(symbols[:500] + MUST_WATCH))
+        # 掃描前 100 檔熱門股確保雲端執行速度，並加入必看清單
+        return list(set(symbols[:100] + MUST_WATCH))
     except:
         return MUST_WATCH
 
-# ====== 2. 技術指標 ======
+# 獲取深度資訊
+def get_extra_info(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        # 1. 新聞 (維持簡短格式避免字數爆炸)
+        news = ticker.news[:2]
+        news_text = "\n".join([f"  - {n.get('title')}" for n in news]) if news else "  (無近期新聞)"
+        # 2. 支撐壓力
+        hist = ticker.history(period="20d")
+        resistance = hist['High'].max()
+        support = hist['Low'].min()
+        target = ticker.info.get('targetMeanPrice', 'N/A')
+        return news_text, support, resistance, target
+    except:
+        return "  (獲取失敗)", 0, 0, "N/A"
+
 def compute_features(df):
+    df = df.copy()
     df["mom20"] = df["Close"].pct_change(20)
     df["mom60"] = df["Close"].pct_change(60)
     delta = df["Close"].diff()
@@ -49,59 +65,64 @@ def compute_features(df):
     df["volatility"] = df["Close"].pct_change().rolling(20).std()
     return df
 
-# ====== 3. 主流程 ======
+def send_to_discord(content):
+    if DISCORD_WEBHOOK_URL and content.strip():
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=15)
+
 def run():
-    symbols = get_combined_list()
-    data = yf.download(symbols, period=f"{YEARS}y", progress=False)
+    if not DISCORD_WEBHOOK_URL: return
     
-    scoring = [] # 存儲 Top Pick
-    must_watch_results = [] # 存儲必看名單結果
-    analyzed_count = 0
+    symbols = get_combined_list()
+    # 逐一抓取數據，對雲端環境較穩定
+    scoring = []
+    must_watch_details = []
     features = ["mom20", "mom60", "rsi", "vol_ratio", "volatility"]
 
+    print(f"📡 開始 AI 掃描 {len(symbols)} 檔標的...")
     for sym in symbols:
         try:
-            df = data.xs(sym, axis=1, level=1).dropna(how='all') if len(symbols) > 1 else data.dropna(how='all')
+            ticker = yf.Ticker(sym)
+            df = ticker.history(period=f"{YEARS}y")
             if len(df) < 250: continue
             
-            analyzed_count += 1
             df = compute_features(df)
             df["future_return"] = df["Close"].shift(-5) / df["Close"] - 1
             full_data = df.dropna()
             
-            model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.07, random_state=42)
+            model = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.07, random_state=42)
             model.fit(full_data[features], full_data["future_return"])
-            
             pred = model.predict(df[features].iloc[-1:])[0]
             
-            res_item = (sym, pred)
-            # 如果在必看名單中，單獨記錄
             if sym in MUST_WATCH:
-                must_watch_results.append(res_item)
-            # 如果流動性達標，加入全市場排名
+                news, sup, res, target = get_extra_info(sym)
+                must_watch_details.append({
+                    "sym": sym, "pred": pred, "price": df["Close"].iloc[-1],
+                    "news": news, "sup": sup, "res": res, "target": target
+                })
+            
             if df["Volume"].tail(20).mean() >= MIN_VOLUME:
-                scoring.append(res_item)
+                scoring.append((sym, pred))
         except: continue
 
-    # 排序
+    # 建立第一段訊息：排行榜
     scoring = sorted(scoring, key=lambda x: x[1], reverse=True)[:TOP_PICK]
-    
-    # 發送 Discord
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    msg = f"🌟 **AI 全市場掃描報表** ({today})\n"
-    msg += "━━━━━━━━━━━━━━━━━━\n"
-    msg += "🏆 **未來 5 日看漲排行榜**\n"
+    top_msg = f"🇹🇼 **台股 AI 掃描報告** ({today})\n"
+    top_msg += "━━━━━━━━━━━━━━━━━━\n"
+    top_msg += "🏆 **未來 5 日漲幅預測 Top 5**\n"
     for i, (s, p) in enumerate(scoring):
-        msg += f"{['🥇','🥈','🥉','📈','📈'][i]} **{s}**: `+{p:.2%}`\n"
-    
-    msg += "\n🔍 **指定標的追蹤**\n"
-    for s, p in must_watch_results:
-        status = "🔥" if p > 0.01 else "💎" if p > 0 else "☁️"
-        msg += f"{status} **{s}**: `+{p:.2%}`\n"
-    
-    msg += "━━━━━━━━━━━━━━━━━━"
-    requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
-    print("✅ 報表已成功發送")
+        top_msg += f"{['🥇','🥈','🥉','📈','📈'][i]} **{s}**: `+{p:.2%}`\n"
+    send_to_discord(top_msg)
+
+    # 建立第二段訊息：重點深度追蹤 (分開傳送避免爆字數)
+    for item in must_watch_details:
+        status = "🚀" if item['pred'] > 0.01 else "💎"
+        detail_msg = f"{status} **{item['sym']}** 深度追蹤\n"
+        detail_msg += f"  - 預測報酬: `{item['pred']:+.2%}`\n"
+        detail_msg += f"  - 現價: {item['price']:.1f} (支撐: {item['sup']:.1f} / 壓力: `{item['res']:.1f}`)\n"
+        detail_msg += f"  - 法人目標價: `{item['target']}`\n"
+        detail_msg += f"  - 最新消息:\n{item['news']}\n"
+        send_to_discord(detail_msg)
 
 if __name__ == "__main__":
     run()
