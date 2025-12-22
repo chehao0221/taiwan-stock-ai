@@ -5,139 +5,137 @@ import requests
 import datetime
 from xgboost import XGBRegressor
 import warnings
+import os
 
 # 忽略警告訊息
 warnings.filterwarnings("ignore")
 
-# ====== 你的 Discord Webhook (建議不要公開) ======
-import os
+# 從環境變數讀取 Webhook (GitHub Secrets)
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
 
 YEARS = 3
 TOP_PICK = 5
+MIN_VOLUME = 500000  # 過濾條件：20日平均成交量需大於 500 張 (500,000 股)
 
-# ====== 選股清單 ======
+# ====== 自動抓取清單與流動性過濾 ======
 def get_taiwan_list():
-    # 包含主要指標 ETF 與 高市值權值股
-    etf_list = ["0050.TW", "0056.TW", "006208.TW", "00878.TW", "00940.TW"]
-    large_caps = [
-        "2330.TW", "2317.TW", "2454.TW", "2603.TW", "2303.TW",
-        "2882.TW", "2308.TW", "1301.TW", "1216.TW", "2357.TW",
-        "2382.TW", "3231.TW", "2301.TW", "2609.TW", "2615.TW"
-    ]
-    return list(set(etf_list + large_caps))
+    print("🔍 正在獲取證交所最新清單...")
+    try:
+        # 證交所上市證券清單
+        url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+        res = requests.get(url)
+        df = pd.read_html(res.text)[0]
+        
+        df.columns = df.iloc[0]
+        df = df.iloc[1:]
+        
+        symbols = []
+        for index, row in df.iterrows():
+            item = row['有價證券代號及名稱']
+            if not isinstance(item, str): continue
+            
+            code = item.split('\u3000')[0]
+            cfi = str(row['CFICode'])
+            
+            # 抓取普通股 (ES) 與 ETF (CE)
+            if cfi.startswith('ES') or cfi.startswith('CE'):
+                symbols.append(code + ".TW")
+        
+        # 先取前 300 檔進行流動性掃描 (涵蓋多數大標的)
+        return list(set(symbols[:300]))
+
+    except Exception as e:
+        print(f"❌ 抓取失敗: {e}，改用保底清單")
+        return ["0050.TW", "0056.TW", "2330.TW", "2317.TW", "2454.TW"]
 
 # ====== 技術指標計算 ======
 def compute_rsi(series, period=14):
     delta = series.diff()
     up = delta.clip(lower=0).rolling(period).mean()
     down = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = up / down
+    rs = up / (down + 1e-9)
     return 100 - (100 / (1 + rs))
 
 def compute_features(df):
-    # 動能因子
     df["mom20"] = df["Close"].pct_change(20)
     df["mom60"] = df["Close"].pct_change(60)
-    # 強弱指標
     df["rsi"] = compute_rsi(df["Close"])
-    # 量能因子
-    df["vol_ratio"] = df["Volume"] / df["Volume"].rolling(20).mean()
-    # 波動因子 (新增：標準差)
+    df["vol_ratio"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1e-9)
     df["volatility"] = df["Close"].pct_change().rolling(20).std()
-    
     return df
 
 # ====== 推送 Discord ======
-def send_discord(scoring):
+def send_discord(scoring, total_analyzed):
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     
     if not scoring:
-        msg = f"⚠️ **台股 AI 選股日報 ({today})**\n今日模型預測無看漲標的，建議觀望。"
+        msg = f"⚠️ **台股 AI 選股日報 ({today})**\n今日經流動性過濾與 AI 篩選後，無看漲標的。"
     else:
         msg = f"🚀 **台股 AI 選股日報** ({today})\n"
-        msg += "根據過去 3 年數據與 XGBoost 模型預測未來 5 日走勢：\n"
+        msg += f"📊 已過濾流動性並分析 `{total_analyzed}` 檔高質量標的\n"
         msg += "━━━━━━━━━━━━━━━\n"
 
         total_score = sum([x[1] for x in scoring])
         for sym, score in scoring:
-            # 權知配置邏輯優化
             weight = (score / total_score) * 100 if total_score > 0 else (100 / len(scoring))
             msg += f"📌 **{sym}**\n"
-            msg += f"    ┣ AI 預期報酬: `+{score:.2%}`\n"
-            msg += f"    ┗ 建議權重: `{weight:.1f}%`\n"
+            msg += f"    ┣ 預期報酬: `+{score:.2%}`\n"
+            msg += f"    ┗ 權重建議: `{weight:.1f}%`\n"
         
         msg += "━━━━━━━━━━━━━━━\n"
-        msg += "⚠️ *本報告僅供參考，投資前請自行評估風險。*"
+        msg += "⚠️ *註：僅分析日均成交量 > 500張之標的，投資請自負盈虧。*"
 
     payload = {"content": msg}
-    try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload)
-        if response.status_code == 204:
-            print(f"[{today}] Discord 推送成功！ ✅")
-        else:
-            print(f"推送失敗，狀態碼: {response.status_code}")
-    except Exception as e:
-        print(f"發送請求時出錯: {e}")
+    requests.post(DISCORD_WEBHOOK_URL, json=payload)
+    print(msg)
 
 # ====== 主流程 ======
 def run():
-    symbols = get_taiwan_list()
-    print(f"📥 正在抓取 {len(symbols)} 檔標的之歷史資料...")
-    
-    # 批次下載以提升速度
-    data = yf.download(symbols, period=f"{YEARS}y", group_by='ticker', progress=False)
+    raw_symbols = get_taiwan_list()
+    print(f"📥 下載資料中 (共 {len(raw_symbols)} 檔)...")
+    data = yf.download(raw_symbols, period=f"{YEARS}y", group_by='ticker', progress=False)
     
     scoring = []
+    analyzed_count = 0
     features_list = ["mom20", "mom60", "rsi", "vol_ratio", "volatility"]
 
-    for sym in symbols:
+    for sym in raw_symbols:
         try:
-            # 提取單一股票資料並清除缺失值
             df = data[sym].copy().dropna(how='all')
-            if len(df) < 250: continue # 數據太少則跳過
             
+            # --- 流動性過濾 ---
+            # 檢查最近 20 天平均成交量是否達標
+            avg_vol = df["Volume"].tail(20).mean()
+            if avg_vol < MIN_VOLUME:
+                continue
+            
+            if len(df) < 250: continue
+            
+            analyzed_count += 1
             df = compute_features(df)
-            
-            # 目標值：未來 5 天的累積報酬率 (Shift 為負代表看向未來)
             df["future_return"] = df["Close"].shift(-5) / df["Close"] - 1
             
-            # 準備訓練資料
             full_data = df.dropna()
             if full_data.empty: continue
             
             X = full_data[features_list]
             y = full_data["future_return"]
 
-            # 建立並訓練模型
-            model = XGBRegressor(
-                n_estimators=100,
-                max_depth=3,
-                learning_rate=0.07,
-                objective='reg:squarederror',
-                random_state=42
-            )
+            model = XGBRegressor(n_estimators=100, max_depth=3, learning_rate=0.07, random_state=42)
             model.fit(X, y)
 
-            # 取得最新一天的特徵進行預測
             last_features = df[features_list].iloc[-1:].values
             prediction = model.predict(last_features)[0]
 
-            # 只保留預測報酬為正的標的
-            if prediction > 0:
+            # 門檻：預估漲幅需大於 0.5%
+            if prediction > 0.005:
                 scoring.append((sym, prediction))
 
-        except Exception as e:
-            print(f"❌ 處理 {sym} 時發生錯誤: {e}")
+        except:
             continue
 
-    # 排序：取預測報酬最高的前 N 名
     scoring = sorted(scoring, key=lambda x: x[1], reverse=True)[:TOP_PICK]
-    
-    # 發送結果
-    send_discord(scoring)
+    send_discord(scoring, analyzed_count)
 
 if __name__ == "__main__":
     run()
-
