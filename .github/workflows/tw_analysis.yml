@@ -1,13 +1,10 @@
-name: Taiwan Stock Post-Market AI Analysis
-
+name: TW Post-Market AI
 on:
   schedule:
-    # 台北時間 14:00 (UTC 06:00)
-    - cron: '0 6 * * 1-5'
+    - cron: '0 6 * * 1-5' # UTC 06:00 = 台北 14:00
   workflow_dispatch: 
-
 jobs:
-  analyze_tw:
+  run:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -16,15 +13,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          cache: 'pip' # 開啟快取加速安裝
       - name: Install
-        run: pip install yfinance pandas numpy requests xgboost scikit-learn lxml html5lib
-      - name: Run Analysis
+        run: pip install -r requirements.txt
+      - name: Analyze
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python run_tw.py
-      - name: Save Audit History
+      - name: Save
         run: |
-          git config --global user.name "TW-AI-Auditor"
+          git config --global user.name "AI-Auditor"
           git config --global user.email "actions@github.com"
           git add tw_history.csv || true
           git commit -m "Update TW history [skip ci]" || true
