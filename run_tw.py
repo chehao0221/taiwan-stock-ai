@@ -7,18 +7,17 @@ from xgboost import XGBRegressor
 from datetime import datetime, timedelta
 import warnings
 
-# 忽略不必要警告
+# =========================
+# 基本設定
+# =========================
 warnings.filterwarnings("ignore")
 
-# =========================
-# 基礎設定
-# =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(BASE_DIR, "tw_history.csv")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
 # =========================
-# 安全推播
+# Discord 安全推播
 # =========================
 def safe_post(msg: str):
     if not WEBHOOK_URL:
@@ -55,18 +54,19 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # =========================
-# 對帳與紀錄
+# 對帳與紀錄（最終版）
 # =========================
 def audit_and_save(results: dict, top_keys):
     if os.path.exists(HISTORY_FILE):
         hist = pd.read_csv(HISTORY_FILE)
-        hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
+        hist["date"] = pd.to_datetime(hist["date"], errors="coerce").dt.date
         hist = hist.dropna(subset=["date"])
     else:
         hist = pd.DataFrame(columns=["date", "symbol", "pred_p", "pred_ret", "settled"])
 
     audit_msg = ""
-    deadline = (datetime.now() - timedelta(days=8)).replace(hour=0, minute=0, second=0)
+    today_date = datetime.now().date()
+    deadline = today_date - timedelta(days=8)
 
     unsettled = hist[(hist["settled"] == False) & (hist["date"] <= deadline)]
 
@@ -74,11 +74,11 @@ def audit_and_save(results: dict, top_keys):
         audit_msg = "\n🎯 **5 日預測結算對帳**\n"
         for idx, r in unsettled.iterrows():
             try:
-                # ✅ 修正 3：避免除以 0
+                # 防呆：避免除以 0 或異常價格
                 if r["pred_p"] <= 0:
                     continue
 
-                price_df = yf.Ticker(r["symbol"]).history(period="1d")
+                price_df = yf.Ticker(r["symbol"]).history(period="5d")
                 if price_df.empty:
                     continue
 
@@ -91,9 +91,8 @@ def audit_and_save(results: dict, top_keys):
             except:
                 continue
 
-    today = datetime.now().strftime("%Y-%m-%d")
     new_rows = [{
-        "date": today,
+        "date": today_date,
         "symbol": s,
         "pred_p": results[s]["c"],
         "pred_ret": results[s]["p"],
@@ -101,6 +100,7 @@ def audit_and_save(results: dict, top_keys):
     } for s in top_keys]
 
     hist = pd.concat([hist, pd.DataFrame(new_rows)], ignore_index=True)
+    hist = hist.drop_duplicates(subset=["date", "symbol"], keep="last")
     hist.to_csv(HISTORY_FILE, index=False)
 
     return audit_msg
@@ -113,17 +113,18 @@ def run():
         "2330.TW", "2317.TW", "2454.TW", "0050.TW",
         "2308.TW", "2382.TW", "2412.TW", "2881.TW"
     ]
+
     feats = ["mom20", "rsi", "bias", "vol_ratio"]
     results = {}
 
-    print(f"[{datetime.now():%H:%M:%S}] 開始下載批量資料…")
+    print(f"[{datetime.now():%H:%M:%S}] 下載市場資料中…")
 
     all_data = yf.download(
         watch,
         period="5y",
         progress=False,
         group_by="ticker",
-        auto_adjust=False
+        auto_adjust=True
     )
 
     for s in watch:
@@ -132,7 +133,9 @@ def run():
                 continue
 
             df = all_data[s].dropna()
-            if len(df) < 120:
+
+            # 流動性與資料長度檢查
+            if len(df) < 120 or df["Volume"].iloc[-1] < 1000:
                 continue
 
             df = compute_features(df)
@@ -155,18 +158,13 @@ def run():
             )
             model.fit(X, y)
 
-            # ✅ 修正 1：避免未來資料滲漏
+            # ✅ 避免未來資料滲漏
             latest_feat = train_df[feats].iloc[-1:]
 
-            pred_ret = model.predict(latest_feat)[0]
-
-            # ✅ 修正 2：限制極端預測值
-            pred_ret = float(np.clip(pred_ret, -0.15, 0.15))
+            # ✅ soft clip，避免極端預測
+            pred_ret = float(np.clip(model.predict(latest_feat)[0], -0.15, 0.15))
 
             last_row = train_df.iloc[-1]
-
-            if pd.isna(last_row["sup"]) or pd.isna(last_row["res"]):
-                continue
 
             results[s] = {
                 "p": pred_ret,
@@ -176,10 +174,10 @@ def run():
             }
 
         except Exception as e:
-            print(f"{s} 處理失敗:", e)
+            print(f"{s} 發生錯誤:", e)
 
     if not results:
-        safe_post("⚠️ 今日無有效分析結果")
+        safe_post("⚠️ 今日資料不足，無法產生預測")
         return
 
     top_results = dict(sorted(results.items(), key=lambda x: x[1]["p"], reverse=True)[:5])
@@ -187,20 +185,21 @@ def run():
 
     msg = f"📊 **台股 AI 進階預測報告 ({datetime.now():%Y-%m-%d})**\n"
     msg += "----------------------------------\n"
+
     for s, i in top_results.items():
-        msg += f"⭐ **{s}** 預估 5 日回報：`{i['p']:+.2%}`\n"
-        msg += f"└ 現價 `{i['c']:.1f}`｜支撐 `{i['s']:.1f}`｜壓力 `{i['r']:.1f}`\n"
+        msg += f"⭐ **{s}** 預估 5 日：`{i['p']:+.2%}`\n"
+        msg += f"└ 現價 `{i['c']:.2f}`｜支撐 `{i['s']:.2f}`｜壓力 `{i['r']:.2f}`\n"
 
     if audit_report:
         msg += audit_report
 
     msg += "\n💡 *AI 為機率模型，僅供研究參考，非投資建議*"
 
-    if len(msg) > 1800:
-        msg = msg[:1800] + "\n...(內容過長已截斷)"
+    if len(msg) > 1900:
+        msg = msg[:1900] + "\n...(訊息過長已截斷)"
 
     safe_post(msg)
-    print(f"[{datetime.now():%H:%M:%S}] 流程完成。")
+    print(f"[{datetime.now():%H:%M:%S}] 完成")
 
 if __name__ == "__main__":
     run()
