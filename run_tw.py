@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore")
 # =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 直接存放在根目錄，與 Workflow 的 git add 指令匹配
-HISTORY_FILE = os.path.join(BASE_DIR, "us_history.csv") 
+HISTORY_FILE = os.path.join(BASE_DIR, "tw_history.csv")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
 # =========================
@@ -23,16 +23,19 @@ def calc_pivot(df):
     r = df.iloc[-20:]
     h, l, c = r["High"].max(), r["Low"].min(), r["Close"].iloc[-1]
     p = (h + l + c) / 3
-    return round(2*p - h, 2), round(2*p - l, 2)
+    return round(2*p - h, 1), round(2*p - l, 1)
 
-def get_sp500():
+def get_tw_300():
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        df = pd.read_html(requests.get(url, headers=headers, timeout=10).text)[0]
-        return [s.replace(".", "-") for s in df["Symbol"]]
+        url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
+        df = pd.read_html(requests.get(url, timeout=10).text)[0]
+        df.columns = df.iloc[0]
+        df = df.iloc[1:]
+        codes = df["有價證券代號及名稱"].str.split("　").str[0]
+        codes = codes[codes.str.len() == 4].head(300)
+        return [f"{c}.TW" for c in codes]
     except:
-        return ["AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "AMZN", "META"]
+        return ["2330.TW", "2317.TW", "2454.TW", "2308.TW", "2382.TW"]
 
 # =========================
 # 5 日回測結算
@@ -47,7 +50,7 @@ def get_settle_report():
     if unsettled.empty:
         return "\n📊 **5 日回測**：尚無可結算資料\n"
 
-    report = "\n🏁 **美股 5 日回測結算報告**\n"
+    report = "\n🏁 **5 日回測結算報告**\n"
     for idx, row in unsettled.iterrows():
         try:
             price_df = yf.download(row["symbol"], period="7d", auto_adjust=True, progress=False)
@@ -70,8 +73,8 @@ def get_settle_report():
 # 主程式
 # =========================
 def run():
-    mag_7 = ["AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "AMZN", "META"]
-    watch = list(dict.fromkeys(mag_7 + get_sp500()))
+    fixed = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW"]
+    watch = list(dict.fromkeys(fixed + get_tw_300()))
 
     data = yf.download(watch, period="2y", auto_adjust=True, group_by="ticker", progress=False)
 
@@ -110,21 +113,21 @@ def run():
         except:
             continue
 
-    msg = f"📊 **美股 AI 進階預測報告 ({datetime.now():%Y-%m-%d})**\n"
+    msg = f"📊 **台股 AI 進階預測報告 ({datetime.now():%Y-%m-%d})**\n"
     msg += "------------------------------------------\n\n"
 
     medals = ["🥇", "🥈", "🥉", "📈", "📈"]
-    horses = {k: v for k, v in results.items() if k not in mag_7 and v["pred"] > 0}
+    horses = {k: v for k, v in results.items() if k not in fixed and v["pred"] > 0}
     top_5 = sorted(horses, key=lambda x: horses[x]["pred"], reverse=True)[:5]
 
-    msg += "🏆 **AI 海選 Top 5 (潛力股)**\n"
+    msg += "🏆 **AI 海選 Top 5 (潛力黑馬)**\n"
     for i, s in enumerate(top_5):
         r = results[s]
         msg += f"{medals[i]} {s}: 預估 `{r['pred']:+.2%}`\n"
         msg += f" └ 現價: `{r['price']:.2f}` (支撐: `{r['sup']}` / 壓力: `{r['res']}`)\n"
 
-    msg += "\n💎 **Magnificent 7 監控 (固定顯示)**\n"
-    for s in mag_7:
+    msg += "\n🔍 **指定權值股監控 (固定顯示)**\n"
+    for s in fixed:
         if s in results:
             r = results[s]
             msg += f"{s}: 預估 `{r['pred']:+.2%}`\n"
@@ -144,7 +147,7 @@ def run():
         "entry_price": results[s]["price"],
         "pred_ret": results[s]["pred"],
         "settled": False
-    } for s in (top_5 + mag_7) if s in results]
+    } for s in (top_5 + fixed) if s in results]
 
     pd.DataFrame(hist).to_csv(
         HISTORY_FILE,
