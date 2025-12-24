@@ -19,3 +19,17 @@ Discord 即時推播：完整報告包含海選黑馬、權值監控與對帳報
 📊 報表示例
 
 📊 台股 AI 進階預測報告 (2025-12-24) 🏆 AI 海選 Top 5 (潛力黑馬) 🥇 2454.TW: 預估 +2.22% └ 現價: 1380.0 (支撐: 1350.0 / 壓力: 1410.0) ... 🏁 5 日回測結算報告 • 2330.TW: 預估 +1.50% | 實際 +2.10% ✅
+
+
+🚀 快速開始 
+設定 Discord Webhook：在您的 Discord 頻道建立 Webhook 並複製網址。
+
+GitHub Secrets 設定：
+
+DISCORD_WEBHOOK_URL：放入您的 Webhook 網址。
+
+權值設定：
+
+前往 GitHub 設定 Workflow permissions 為 Read and write permissions，以確保歷史紀錄可存檔。
+
+⚠️ 免責聲明 本專案僅供機器學習研究參考，不構成任何投資建議。股市投資有風險，AI 預測可能存在誤差，請投資人審慎評估。
