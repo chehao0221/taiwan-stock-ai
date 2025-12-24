@@ -1,3 +1,17 @@
+from utils.market_calendar import is_market_open
+
+# 👉 台股
+if not is_market_open("TW"):
+    print("📌 因假日或節日，股市未開盤，停止動作")
+    exit()
+
+# 👉 美股
+# if not is_market_open("US"):
+#     print("📌 因假日或節日，美股未開盤，停止動作")
+#     exit()
+
+print("✅ 股市開盤，開始執行策略")
+
 import yfinance as yf
 import pandas as pd
 import requests
@@ -158,3 +172,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+
