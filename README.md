@@ -1,76 +1,21 @@
-🚀 Taiwan Stock AI Predictor (台股 AI 自動化預測)
-這是一個基於機器學習的自動化台股分析工具。透過 GitHub Actions 每日盤後自動抓取資料、訓練 XGBoost 模型，並將預測結果與支撐壓力位推播至 Discord 頻道，同時具備「五日後自動對帳」功能來驗證 AI 準確度。
+🚀 Taiwan Stock AI Predictor (台股 AI 自動化海選與預測) 這是一個基於機器學習的自動化台股分析工具。透過 GitHub Actions 每日盤後自動從台股前 300 檔中海選潛力標的，結合 XGBoost 模型預測未來 5 日回報，並提供精確的支撐壓力位與「五日勝率對帳」系統。
 
 🌟 核心功能
-自動化運行：每日台北時間 8:30 (盤前) 自動啟動分析。
 
-機器學習預測：使用 XGBoost 迴歸模型預測未來 5 日回報率。
+盤後海選機制：每日台北時間 15:30 自動執行，從台股前 300 檔標的中篩選預期漲幅最高的 5 支黑馬。
 
-技術指標分析：自動計算 RSI、MA20 乖離率、成交量比率及 60 日支撐/壓力位。
+機器學習預測：使用 XGBoost 迴歸模型，分析動量、乖離率及成交量結構。
 
-回測對帳系統：自動追蹤 5 天前的預測，並比對實際股價進行「勝率對帳」。
+技術指標與區間：自動計算近 20 日的 支撐位 (Support) 與 壓力位 (Resistance)。
 
-Discord 整合：預測結果與對帳報表第一時間推播至手機。
+回測對帳系統：自動追蹤 5 天前的預測，顯示實際漲跌並標註 ✅/❌，讓準確度透明化。
 
-🛠️ 技術棧
-語言: Python 3.10
-
-模型: XGBoost (Regressor)
-
-資料來源: yfinance (Yahoo Finance API)
-
-自動化: GitHub Actions
-
-資料庫: CSV 檔案 (透過 Git 自動更新紀錄)
-
-📊 預測邏輯與特徵
-模型主要觀察以下特徵 (features)：
-
-mom20: 20 日動量指標。
-
-rsi: 強弱指標，判斷是否超買或超賣。
-
-bias: 股價與 20 日均線的乖離率。
-
-vol_ratio: 當前成交量與 20 日均量的比率。
-
-🚀 快速開始
-1. 複製專案
-Bash
-
-git clone https://github.com/你的用戶名/taiwan-stock-ai-main.git
-cd taiwan-stock-ai-main
-2. 設定 Discord Webhook
-在 Discord 頻道中：編輯頻道 -> 整合 -> Webhook -> 建立 Webhook。
-
-複製 Webhook URL。
-
-3. GitHub Secrets 設定 (重要)
-為了讓自動化腳本能發送訊息，請在 GitHub Repo 設定：
-
-前往 Settings -> Secrets and variables -> Actions。
-
-點擊 New repository secret。
-
-名稱輸入：DISCORD_WEBHOOK_URL。
-
-數值輸入：你的 Discord Webhook 網址。
-
-4. 權限設定
-為了讓 GitHub Actions 能自動更新 tw_history.csv，請確保：
-
-Settings -> Actions -> General -> Workflow permissions 設為 Read and write permissions。
+Discord 即時推播：完整報告包含海選黑馬、權值監控與對帳報表。
 
 📅 運行時間
-自動觸發: 每週一至週五 14:00 (台北時間)。
 
-手動觸發: 可在 GitHub Actions 頁面點擊 Run workflow 立即執行。
+自動觸發：每週一至週五 15:30 (台北時間)，確保完整抓取當日收盤數據。
 
-📝 報表示例
-📊 台股 AI 進階預測報告 (2025-12-23)
-⭐ 2330.TW 預估 5 日：+2.45% └ 現價 1030.00｜支撐 1010.00｜壓力 1080.00
+📊 報表示例
 
-🎯 5 日預測結算對帳 2454.TW +1.50% ➜ +2.10% ✅ 2317.TW -0.50% ➜ +0.20% ❌
-
-⚠️ 免責聲明
-本專案僅供機器學習研究參考，不構成任何投資建議。股市投資有風險，AI 預測可能存在誤差，請投資人審慎評估。
+📊 台股 AI 進階預測報告 (2025-12-24) 🏆 AI 海選 Top 5 (潛力黑馬) 🥇 2454.TW: 預估 +2.22% └ 現價: 1380.0 (支撐: 1350.0 / 壓力: 1410.0) ... 🏁 5 日回測結算報告 • 2330.TW: 預估 +1.50% | 實際 +2.10% ✅
