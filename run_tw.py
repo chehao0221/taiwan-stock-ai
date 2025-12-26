@@ -11,7 +11,7 @@ import pandas as pd
 import requests
 import os
 from xgboost import XGBRegressor
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -23,8 +23,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(BASE_DIR, "tw_history.csv")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
+# 固定權值股（不動）
+FIXED = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW"]
+
 # =========================
-# 工具函數
+# 技術工具
 # =========================
 def calc_pivot(df):
     r = df.iloc[-20:]
@@ -32,17 +35,45 @@ def calc_pivot(df):
     p = (h + l + c) / 3
     return round(2*p - h, 1), round(2*p - l, 1)
 
-def get_tw_300():
+def get_top300_by_volume():
+    """
+    取得近 20 個交易日『平均成交量』前 300 檔台股
+    """
     try:
+        # 從 TWSE 官方名單抓全部上市股票代碼
         url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
         df = pd.read_html(requests.get(url, timeout=10).text)[0]
         df.columns = df.iloc[0]
         df = df.iloc[1:]
         codes = df["有價證券代號及名稱"].str.split("　").str[0]
-        codes = codes[codes.str.len() == 4].head(300)
-        return [f"{c}.TW" for c in codes]
+        codes = codes[codes.str.len() == 4]
+        tickers = [f"{c}.TW" for c in codes]
+
+        # 抓最近 1 個月成交量
+        vol_data = yf.download(
+            tickers,
+            period="1mo",
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            threads=True
+        )
+
+        avg_vol = {}
+        for t in tickers:
+            try:
+                v = vol_data[t]["Volume"].dropna().tail(20).mean()
+                if v > 0:
+                    avg_vol[t] = v
+            except:
+                continue
+
+        top300 = sorted(avg_vol, key=avg_vol.get, reverse=True)[:300]
+        return top300
+
     except:
-        return ["2330.TW", "2317.TW", "2454.TW", "2308.TW", "2382.TW"]
+        # 保底
+        return FIXED
 
 # =========================
 # 5 日回測結算
@@ -60,8 +91,10 @@ def get_settle_report():
     report = "\n🏁 **5 日回測結算報告**\n"
     for idx, row in unsettled.iterrows():
         try:
-            price_df = yf.download(row["symbol"], period="7d", auto_adjust=True, progress=False)
-            exit_price = price_df["Close"].iloc[-1]
+            p = yf.download(row["symbol"], period="7d", auto_adjust=True, progress=False)
+            if p.empty:
+                continue
+            exit_price = p["Close"].iloc[-1]
             ret = (exit_price - row["entry_price"]) / row["entry_price"]
             win = (ret > 0 and row["pred_ret"] > 0) or (ret < 0 and row["pred_ret"] < 0)
 
@@ -73,25 +106,27 @@ def get_settle_report():
         except:
             continue
 
+    # 只留 180 天
+    df["date"] = pd.to_datetime(df["date"])
+    df = df[df["date"] >= datetime.now() - timedelta(days=180)]
     df.to_csv(HISTORY_FILE, index=False)
+
     return report
 
 # =========================
 # 主程式
 # =========================
 def run():
-    fixed = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW"]
-    watch = list(dict.fromkeys(fixed + get_tw_300()))
-
-    data = yf.download(watch, period="2y", auto_adjust=True, group_by="ticker", progress=False)
+    universe = list(dict.fromkeys(FIXED + get_top300_by_volume()))
+    data = yf.download(universe, period="2y", auto_adjust=True, group_by="ticker", progress=False)
 
     feats = ["mom20", "bias", "vol_ratio"]
     results = {}
 
-    for s in watch:
+    for s in universe:
         try:
             df = data[s].dropna()
-            if len(df) < 150:
+            if len(df) < 160:
                 continue
 
             df["mom20"] = df["Close"].pct_change(20)
@@ -100,10 +135,15 @@ def run():
             df["target"] = df["Close"].shift(-5) / df["Close"] - 1
 
             train = df.iloc[:-5].dropna()
+            if len(train) < 80:
+                continue
+
             model = XGBRegressor(
-                n_estimators=120,
+                n_estimators=90,
                 max_depth=3,
                 learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
                 random_state=42
             )
             model.fit(train[feats], train["target"])
@@ -124,7 +164,7 @@ def run():
     msg += "------------------------------------------\n\n"
 
     medals = ["🥇", "🥈", "🥉", "📈", "📈"]
-    horses = {k: v for k, v in results.items() if k not in fixed and v["pred"] > 0}
+    horses = {k: v for k, v in results.items() if k not in FIXED and v["pred"] > 0}
     top_5 = sorted(horses, key=lambda x: horses[x]["pred"], reverse=True)[:5]
 
     msg += "🏆 **AI 海選 Top 5 (潛力黑馬)**\n"
@@ -134,7 +174,7 @@ def run():
         msg += f" └ 現價: `{r['price']:.2f}` (支撐: `{r['sup']}` / 壓力: `{r['res']}`)\n"
 
     msg += "\n🔍 **指定權值股監控 (固定顯示)**\n"
-    for s in fixed:
+    for s in FIXED:
         if s in results:
             r = results[s]
             msg += f"{s}: 預估 `{r['pred']:+.2%}`\n"
@@ -154,14 +194,15 @@ def run():
         "entry_price": results[s]["price"],
         "pred_ret": results[s]["pred"],
         "settled": False
-    } for s in (top_5 + fixed) if s in results]
+    } for s in (top_5 + FIXED) if s in results]
 
-    pd.DataFrame(hist).to_csv(
-        HISTORY_FILE,
-        mode="a",
-        header=not os.path.exists(HISTORY_FILE),
-        index=False
-    )
+    if hist:
+        pd.DataFrame(hist).to_csv(
+            HISTORY_FILE,
+            mode="a",
+            header=not os.path.exists(HISTORY_FILE),
+            index=False
+        )
 
 if __name__ == "__main__":
     if pre_check():
