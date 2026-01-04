@@ -1,40 +1,43 @@
 name: TW Post-Market AI (15:30 台北時間執行)
+
 on:
   schedule:
     # 台北時間 15:30 執行 (UTC 07:30)
-    # 這樣每天下午茶時間你就能收到今日收盤後的最新分析
     - cron: '30 7 * * 1-5'
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # 確保環境包含 yfinance pandas numpy requests xgboost lxml
 
-      - name: Analyze Market
+      - name: Run TW AI script
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        # 確保檔名與您的腳本一致
         run: python run_tw.py
 
       - name: Commit and Save History
         run: |
           git config --global user.name "AI-Auditor"
           git config --global user.email "actions@github.com"
+
           git add tw_history.csv || true
+
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
