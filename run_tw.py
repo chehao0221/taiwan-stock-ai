@@ -29,11 +29,12 @@ TOP300_CACHE_FILE = os.path.join(CACHE_DIR, "top300_tw.json")
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-# 權值股（保留你原本那個概念）
+# 固定顯示權值股（照你原本）
 FIXED = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW"]
 
+
 # -----------------------------
-# Helpers
+# Time helpers
 # -----------------------------
 def _now_tw() -> datetime:
     return datetime.now(ZoneInfo("Asia/Taipei"))
@@ -51,6 +52,9 @@ def pre_check() -> bool:
     return True
 
 
+# -----------------------------
+# Finance helpers
+# -----------------------------
 def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
     """近 20 日 Pivot 支撐/壓力（簡易版）"""
     r = df.iloc[-20:]
@@ -69,7 +73,7 @@ def nth_trading_day_after(start_date: str, n: int, calendar_name: str = "XTAI") 
     cal = mcal.get_calendar(calendar_name)
     schedule = cal.schedule(
         start_date=start_date,
-        end_date=pd.Timestamp(start_date) + pd.Timedelta(days=60)  # 避免遇到長假不夠用
+        end_date=pd.Timestamp(start_date) + pd.Timedelta(days=60),  # 避免遇到長假不夠用
     )
     days = schedule.index.strftime("%Y-%m-%d").tolist()
 
@@ -85,6 +89,9 @@ def nth_trading_day_after(start_date: str, n: int, calendar_name: str = "XTAI") 
     return days[target]
 
 
+# -----------------------------
+# History IO
+# -----------------------------
 def _read_history() -> pd.DataFrame:
     """
     讀取 tw_history.csv（新格式）
@@ -110,7 +117,7 @@ def _read_history() -> pd.DataFrame:
 
     df = pd.read_csv(HISTORY_FILE)
 
-    # 補齊缺欄位（就算你之後又換格式也不會炸）
+    # 補齊缺欄位（避免舊檔/不同版本炸掉）
     for c in cols:
         if c not in df.columns:
             df[c] = pd.NA
@@ -126,6 +133,9 @@ def _write_history(df: pd.DataFrame) -> None:
     df.to_csv(HISTORY_FILE, index=False, encoding="utf-8-sig")
 
 
+# -----------------------------
+# Top300 cache
+# -----------------------------
 def _load_top300_cache(today: str) -> List[str] | None:
     try:
         with open(TOP300_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -162,6 +172,7 @@ def get_top300_by_volume(today: str) -> List[str]:
     tickers = [f"{c}.TW" for c in codes if c.isdigit() and len(c) == 4]
 
     data = safe_yf_download(tickers, period="1mo", max_chunk=80)
+
     avg_vol: Dict[str, float] = {}
     for t, d in data.items():
         if d is None or len(d) < 5:
@@ -175,18 +186,18 @@ def get_top300_by_volume(today: str) -> List[str]:
     return top300
 
 
+# -----------------------------
+# Settlement + stats
+# -----------------------------
 def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     """
     結算 tw_history.csv 裡：
     - status == pending
     - settle_date <= today
-    並輸出你原本想要的「預估 vs 實際 + ✅/❌」格式
+    回傳（更新後 hist, 結算明細文字）
     """
     hist = _read_history()
     if hist.empty:
-        return hist, ""
-
-    if "settle_date" not in hist.columns:
         return hist, ""
 
     # settle_date 全空就不用結算
@@ -205,7 +216,7 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     tickers = sorted(pending["ticker"].astype(str).unique().tolist())
     data = safe_yf_download(tickers, period="3mo", max_chunk=60)
 
-    settled_lines = []
+    settled_lines: List[str] = []
     now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
 
     for idx, row in pending.iterrows():
@@ -249,12 +260,47 @@ def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     if not settled_lines:
         return hist, ""
 
-    # 保持你原本的顯示方式（標題 + 點列）
-    msg = "🏁 5 日回測結算報告\n" + "\n".join(settled_lines[:10])
+    # 結算明細：維持你原本「只列內容」的風格（標題由主訊息統一印）
+    msg = "\n".join(settled_lines[:10])
     if len(settled_lines) > 10:
         msg += f"\n… 另外還有 {len(settled_lines) - 10} 筆已結算"
 
     return hist, msg
+
+
+def last20_stats_line(hist: pd.DataFrame) -> str:
+    """
+    產生：
+    最近 20 筆命中率：65% / 平均報酬：+3.2%
+    - 只看 status==settled 且 realized_return 有值
+    - 用 settle_date 排序（同日多筆也 OK）
+    """
+    if hist is None or hist.empty:
+        return "最近 20 筆命中率：--% / 平均報酬：--%"
+
+    df = hist.copy()
+    df = df[df["status"].astype(str) == "settled"]
+    df = df[pd.to_numeric(df["realized_return"], errors="coerce").notna()]
+    if df.empty:
+        return "最近 20 筆命中率：--% / 平均報酬：--%"
+
+    # 排序：先 settle_date，再 updated_at（保險）
+    df["settle_date_sort"] = pd.to_datetime(df["settle_date"], errors="coerce")
+    df["updated_at_sort"] = pd.to_datetime(df["updated_at"], errors="coerce")
+    df = df.sort_values(by=["settle_date_sort", "updated_at_sort"], ascending=True)
+
+    df20 = df.tail(20)
+
+    hit = pd.to_numeric(df20["hit"], errors="coerce")
+    rr = pd.to_numeric(df20["realized_return"], errors="coerce")
+
+    hit_rate = float(hit.mean()) if hit.notna().any() else float("nan")
+    avg_rr = float(rr.mean()) if rr.notna().any() else float("nan")
+
+    if not pd.notna(hit_rate) or not pd.notna(avg_rr):
+        return "最近 20 筆命中率：--% / 平均報酬：--%"
+
+    return f"最近 20 筆命中率：{hit_rate:.0%} / 平均報酬：{avg_rr:+.2%}"
 
 
 def append_today_predictions(hist: pd.DataFrame, today: str, rows: List[dict]) -> pd.DataFrame:
@@ -280,6 +326,9 @@ def append_today_predictions(hist: pd.DataFrame, today: str, rows: List[dict]) -
     return pd.concat([hist, df_new], ignore_index=True)
 
 
+# -----------------------------
+# Discord post
+# -----------------------------
 def _post(content: str) -> None:
     if WEBHOOK_URL:
         try:
@@ -298,7 +347,7 @@ def run() -> None:
     today = _today_tw()
 
     # 1) 先做歷史結算（到期的補上 ✅/❌）
-    hist, settle_msg = settle_history(today)
+    hist, settle_detail = settle_history(today)
 
     # 2) 今日預測（Top300 + 權值）
     universe = list(dict.fromkeys(FIXED + get_top300_by_volume(today)))
@@ -348,7 +397,7 @@ def run() -> None:
         _post("⚠️ 今日無可用結果（可能資料不足或抓取失敗）")
         return
 
-    # 你原本想要「海選 Top5（黑馬）」的樣子
+    # 海選 Top5
     top = sorted(results.items(), key=lambda kv: kv[1]["pred"], reverse=True)[:5]
 
     # 3) 寫入歷史（今日 Top5，並計算第 5 個交易日結算日）
@@ -372,20 +421,40 @@ def run() -> None:
     hist = append_today_predictions(hist, today, new_rows)
     _write_history(hist)
 
-    # 4) Discord 顯示：維持你 README 那種風格
-    msg = f"📊 台股 AI 進階預測報告 ({today})\n\n"
-    msg += "🏆 AI 海選 Top 5 (潛力黑馬)\n"
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    # 4) 統計（最近 20 筆結算）
+    stats_line = last20_stats_line(hist)
 
+    # =============================
+    # Discord 顯示：維持你原本格式
+    # =============================
+    msg = f"📊 台股 AI 進階預測報告 ({today})\n"
+    msg += "-" * 42 + "\n\n"
+
+    # --- Top 5 ---
+    msg += "🏆 AI 海選 Top 5 (潛力股)\n"
+    medals = ["🥇", "🥈", "🥉", "📈", "📈"]
     for i, (t, r) in enumerate(top):
-        medal = medals[i] if i < len(medals) else "•"
-        msg += f"{medal} {t}: 預估 {r['pred']:+.2%}\n"
-        msg += f"   └ 現價: {r['price']} / 支撐: {r['sup']} / 壓力: {r['res']}\n"
+        msg += f"{medals[i]} {t}: 預估 {r['pred']:+.2%}\n"
+        msg += f" └ 現價: {r['price']} (支撐: {r['sup']} / 壓力: {r['res']})\n"
 
-    if settle_msg:
-        msg += "\n" + settle_msg + "\n"
+    # --- Fixed large-cap stocks ---
+    msg += "\n💎 指定權值股監控 (固定顯示)\n"
+    for t in FIXED:
+        if t not in results:
+            continue
+        r = results[t]
+        msg += f"{t}: 預估 {r['pred']:+.2%}\n"
+        msg += f" └ 現價: {r['price']} (支撐: {r['sup']} / 壓力: {r['res']})\n"
 
-    msg += "\n⚠️ 免責聲明：本專案僅供研究參考，不構成任何投資建議。"
+    # --- Settlement ---
+    msg += "\n🏁 台股 5 日回測結算報告\n"
+    if settle_detail.strip():
+        msg += settle_detail + "\n"
+
+    # --- Stats line you asked (always shown, even if no settlements yet) ---
+    msg += f"\n{stats_line}\n"
+
+    msg += "\n💡 AI 為機率模型，僅供研究參考"
 
     _post(msg[:1900])
 
