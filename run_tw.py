@@ -29,15 +29,18 @@ TOP300_CACHE_FILE = os.path.join(CACHE_DIR, "top300_tw.json")
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-# 你常看的權值股（保留）
+# 權值股（保留你原本那個概念）
 FIXED = ["2330.TW", "2317.TW", "2454.TW", "0050.TW", "2308.TW", "2382.TW"]
 
 # -----------------------------
 # Helpers
 # -----------------------------
+def _now_tw() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Taipei"))
+
+
 def _today_tw() -> str:
-    """台北時間今天 YYYY-MM-DD"""
-    return datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
+    return _now_tw().strftime("%Y-%m-%d")
 
 
 def pre_check() -> bool:
@@ -60,55 +63,62 @@ def calc_pivot(df: pd.DataFrame) -> Tuple[float, float]:
 
 def nth_trading_day_after(start_date: str, n: int, calendar_name: str = "XTAI") -> str:
     """
-    回傳 start_date 之後第 n 個交易日（不含 start_date 當天）。
-    使用 pandas_market_calendars 的交易所日曆避免週末/假日。
+    回傳 start_date 之後第 n 個交易日（不含 start_date 當天）
+    用交易所日曆避開週末/假日
     """
     cal = mcal.get_calendar(calendar_name)
-    # 取較寬鬆的區間，避免遇到長假
-    schedule = cal.schedule(start_date=start_date, end_date=pd.Timestamp(start_date) + pd.Timedelta(days=60))
+    schedule = cal.schedule(
+        start_date=start_date,
+        end_date=pd.Timestamp(start_date) + pd.Timedelta(days=60)  # 避免遇到長假不夠用
+    )
     days = schedule.index.strftime("%Y-%m-%d").tolist()
+
     if start_date in days:
         pos = days.index(start_date)
         target = pos + n
     else:
-        # 若 start_date 不是交易日（理論上不會發生，因為 pre_check 已擋）
-        # 就找下一個交易日當作起點
+        # 理論上不會發生（因為 pre_check 已擋非交易日）
         target = n - 1
+
     if target >= len(days):
         raise RuntimeError("交易日曆不足，請加大 end_date 範圍")
     return days[target]
 
 
 def _read_history() -> pd.DataFrame:
+    """
+    讀取 tw_history.csv（新格式）
+    若不存在：建立空表（包含完整欄位）
+    """
+    cols = [
+        "run_date",
+        "ticker",
+        "pred",
+        "price_at_run",
+        "sup",
+        "res",
+        "settle_date",
+        "settle_close",
+        "realized_return",
+        "hit",
+        "status",
+        "updated_at",
+    ]
+
     if not os.path.exists(HISTORY_FILE):
-        return pd.DataFrame(
-            columns=[
-                "run_date",
-                "ticker",
-                "pred",
-                "price_at_run",
-                "sup",
-                "res",
-                "settle_date",
-                "settle_close",
-                "realized_return",
-                "hit",
-                "status",
-                "updated_at",
-            ]
-        )
+        return pd.DataFrame(columns=cols)
 
     df = pd.read_csv(HISTORY_FILE)
 
-    # 保證欄位完整（避免舊檔案）
-    for col in ["settle_close", "realized_return", "hit", "status", "updated_at"]:
-        if col not in df.columns:
-            df[col] = pd.NA
-
-    if "status" not in df.columns:
-        df["status"] = "pending"
+    # 補齊缺欄位（就算你之後又換格式也不會炸）
+    for c in cols:
+        if c not in df.columns:
+            df[c] = pd.NA
 
     df["status"] = df["status"].fillna("pending")
+    df["run_date"] = df["run_date"].astype(str)
+    df["ticker"] = df["ticker"].astype(str)
+    df["settle_date"] = df["settle_date"].fillna("").astype(str)
     return df
 
 
@@ -137,22 +147,20 @@ def _save_top300_cache(today: str, tickers: List[str]) -> None:
 
 def get_top300_by_volume(today: str) -> List[str]:
     """
-    先抓「上市股票清單」→ 用 yfinance 拉 1M 資料計算近 20 日平均量 → 取前 300。
-    這一步最容易被 yfinance 429，所以做「當日快取」：同一天內重跑不會再抓一輪。
+    先抓「上市股票清單」→ 用 yfinance 拉 1M 資料計算近 20 日平均量 → 取前 300
+    這一步最容易被 yfinance 429，所以做「當日快取」：同一天內重跑不會再抓一輪
     """
     cached = _load_top300_cache(today)
     if cached:
         return cached
 
-    # 取得上市清單（四碼）
     url = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2"
     html = requests.get(url, timeout=15).text
-    df = pd.read_html(html)[0]
-    df.columns = df.iloc[0]
-    codes = df.iloc[1:][df.columns[0]].astype(str).str.split(" ").str[0]
+    table = pd.read_html(html)[0]
+    table.columns = table.iloc[0]
+    codes = table.iloc[1:][table.columns[0]].astype(str).str.split(" ").str[0]
     tickers = [f"{c}.TW" for c in codes if c.isdigit() and len(c) == 4]
 
-    # 分批抓取近 1 個月資料，算均量
     data = safe_yf_download(tickers, period="1mo", max_chunk=80)
     avg_vol: Dict[str, float] = {}
     for t, d in data.items():
@@ -169,84 +177,118 @@ def get_top300_by_volume(today: str) -> List[str]:
 
 def settle_history(today: str) -> Tuple[pd.DataFrame, str]:
     """
-    對 tw_history.csv 裡「已到期（settle_date <= today）」但尚未結算的項目做結算。
-    回傳（更新後的 df, 結算訊息文字）
+    結算 tw_history.csv 裡：
+    - status == pending
+    - settle_date <= today
+    並輸出你原本想要的「預估 vs 實際 + ✅/❌」格式
     """
     hist = _read_history()
     if hist.empty:
         return hist, ""
 
-    # 找待結算且到期的
-    pending = hist[(hist["status"] == "pending") & (hist["settle_date"].astype(str) <= today)]
+    if "settle_date" not in hist.columns:
+        return hist, ""
+
+    # settle_date 全空就不用結算
+    if hist["settle_date"].astype(str).str.len().eq(0).all():
+        return hist, ""
+
+    pending = hist[
+        (hist["status"].astype(str) == "pending")
+        & (hist["settle_date"].astype(str) <= today)
+        & (hist["settle_date"].astype(str).str.len() > 0)
+    ]
+
     if pending.empty:
         return hist, ""
 
     tickers = sorted(pending["ticker"].astype(str).unique().tolist())
-    # 為了穩定，直接抓 3mo，足夠涵蓋 settle_date
     data = safe_yf_download(tickers, period="3mo", max_chunk=60)
 
-    settled_rows = []
+    settled_lines = []
+    now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
+
     for idx, row in pending.iterrows():
         t = str(row["ticker"])
         settle_date = str(row["settle_date"])
+
         d = data.get(t)
         if d is None or d.empty:
             continue
 
-        # yfinance index 可能是 Timestamp（含時區/不含時區），統一轉字串日期
         d2 = d.copy()
         d2.index = pd.to_datetime(d2.index).strftime("%Y-%m-%d")
 
         if settle_date not in d2.index:
-            # 保守：如果找不到，先略過（不亂補日期）
             continue
 
         settle_close = float(d2.loc[settle_date, "Close"])
         price_at_run = float(row["price_at_run"])
         rr = (settle_close / price_at_run) - 1.0
 
+        pred = row.get("pred", pd.NA)
+        try:
+            pred_f = float(pred)
+        except Exception:
+            pred_f = None
+
+        hit = int(rr > 0)
+        mark = "✅" if hit == 1 else "❌"
+
         hist.at[idx, "settle_close"] = round(settle_close, 2)
         hist.at[idx, "realized_return"] = rr
-        hist.at[idx, "hit"] = int(rr > 0)
+        hist.at[idx, "hit"] = hit
         hist.at[idx, "status"] = "settled"
-        hist.at[idx, "updated_at"] = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
-        settled_rows.append((t, settle_date, rr))
+        hist.at[idx, "updated_at"] = now_str
 
-    if not settled_rows:
+        if pred_f is None:
+            settled_lines.append(f"• {t}: 實際 {rr:+.2%} {mark}")
+        else:
+            settled_lines.append(f"• {t}: 預估 {pred_f:+.2%} | 實際 {rr:+.2%} {mark}")
+
+    if not settled_lines:
         return hist, ""
 
-    # 結算摘要（只列最多 8 筆，避免 Discord 太長）
-    lines = ["🏁 台股 5 日回測結算（到期項目）"]
-    for t, dte, rr in settled_rows[:8]:
-        lines.append(f"- {t} @ {dte}: `{rr:+.2%}`")
-    if len(settled_rows) > 8:
-        lines.append(f"... 另外還有 {len(settled_rows) - 8} 筆已結算")
+    # 保持你原本的顯示方式（標題 + 點列）
+    msg = "🏁 5 日回測結算報告\n" + "\n".join(settled_lines[:10])
+    if len(settled_lines) > 10:
+        msg += f"\n… 另外還有 {len(settled_lines) - 10} 筆已結算"
 
-    return hist, "\n".join(lines) + "\n"
+    return hist, msg
 
 
 def append_today_predictions(hist: pd.DataFrame, today: str, rows: List[dict]) -> pd.DataFrame:
     if not rows:
         return hist
 
-    now_str = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_tw().strftime("%Y-%m-%d %H:%M:%S")
     df_new = pd.DataFrame(rows)
     df_new["run_date"] = today
     df_new["status"] = "pending"
     df_new["updated_at"] = now_str
 
-    # 避免同一天重跑把同一檔重複寫入：用 (run_date, ticker) 去重
+    # 避免同一天重跑重複寫入（run_date + ticker）
     if not hist.empty:
         hist["run_date"] = hist["run_date"].astype(str)
         hist["ticker"] = hist["ticker"].astype(str)
         existing = set(zip(hist["run_date"], hist["ticker"]))
-        df_new = df_new[~df_new.apply(lambda r: (today, r["ticker"]) in existing, axis=1)]
+        df_new = df_new[~df_new.apply(lambda r: (today, str(r["ticker"])) in existing, axis=1)]
 
     if df_new.empty:
         return hist
 
-    out = pd.concat([hist, df_new], ignore_index=True)
-    return out
+    return pd.concat([hist, df_new], ignore_index=True)
+
+
+def _post(content: str) -> None:
+    if WEBHOOK_URL:
+        try:
+            requests.post(WEBHOOK_URL, json={"content": content}, timeout=15)
+        except Exception as e:
+            print(f"⚠️ Discord 發送失敗: {e}")
+            print(content)
+    else:
+        print(content)
 
 
 # -----------------------------
@@ -255,10 +297,10 @@ def append_today_predictions(hist: pd.DataFrame, today: str, rows: List[dict]) -
 def run() -> None:
     today = _today_tw()
 
-    # 1) 先做歷史結算（到期的就補上）
+    # 1) 先做歷史結算（到期的補上 ✅/❌）
     hist, settle_msg = settle_history(today)
 
-    # 2) 今日預測（Top300 + FIXED）
+    # 2) 今日預測（Top300 + 權值）
     universe = list(dict.fromkeys(FIXED + get_top300_by_volume(today)))
     data = safe_yf_download(universe, period="2y", max_chunk=60)
 
@@ -303,13 +345,13 @@ def run() -> None:
         }
 
     if not results:
-        msg = "⚠️ 今日無可用結果（可能資料不足或抓取失敗）"
-        _post(msg)
+        _post("⚠️ 今日無可用結果（可能資料不足或抓取失敗）")
         return
 
+    # 你原本想要「海選 Top5（黑馬）」的樣子
     top = sorted(results.items(), key=lambda kv: kv[1]["pred"], reverse=True)[:5]
 
-    # 3) 寫入歷史（今日 Top5）
+    # 3) 寫入歷史（今日 Top5，並計算第 5 個交易日結算日）
     new_rows = []
     for t, r in top:
         settle_date = nth_trading_day_after(today, 5, calendar_name="XTAI")
@@ -326,33 +368,26 @@ def run() -> None:
                 "hit": pd.NA,
             }
         )
+
     hist = append_today_predictions(hist, today, new_rows)
     _write_history(hist)
 
-    # 4) 組 Discord 訊息
-    msg = f"📈 台股收盤 AI 分析（{today}）\n\n"
-    msg += "🔥 預估 5 日報酬 Top 5\n\n"
-    for t, r in top:
-        msg += f"{t}: 預估 `{r['pred']:+.2%}`\n"
-        msg += f" └ 現價: `{r['price']}` (Pivot 支撐: `{r['sup']}` / 壓力: `{r['res']}`)\n"
+    # 4) Discord 顯示：維持你 README 那種風格
+    msg = f"📊 台股 AI 進階預測報告 ({today})\n\n"
+    msg += "🏆 AI 海選 Top 5 (潛力黑馬)\n"
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+
+    for i, (t, r) in enumerate(top):
+        medal = medals[i] if i < len(medals) else "•"
+        msg += f"{medal} {t}: 預估 {r['pred']:+.2%}\n"
+        msg += f"   └ 現價: {r['price']} / 支撐: {r['sup']} / 壓力: {r['res']}\n"
 
     if settle_msg:
-        msg += "\n\n" + settle_msg
+        msg += "\n" + settle_msg + "\n"
 
-    msg += "\n💡 AI 為機率模型，僅供研究參考"
+    msg += "\n⚠️ 免責聲明：本專案僅供研究參考，不構成任何投資建議。"
 
     _post(msg[:1900])
-
-
-def _post(content: str) -> None:
-    if WEBHOOK_URL:
-        try:
-            requests.post(WEBHOOK_URL, json={"content": content}, timeout=15)
-        except Exception as e:
-            print(f"⚠️ Discord 發送失敗: {e}")
-            print(content)
-    else:
-        print(content)
 
 
 if __name__ == "__main__":
